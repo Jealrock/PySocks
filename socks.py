@@ -439,6 +439,13 @@ class socksocket(_BaseSocket):
         else:
             return super(socksocket, self).send(bytes, flags, **kwargs)
 
+    def sendall(self, bytes):
+        if self.proxy[0] == HTTP_4TO6:
+            self._negotiate_HTTP_4TO6(self.dest_addr, self.dest_port, bytes)
+        else:
+            super().sendall(bytes)
+
+
     def recvfrom(self, bufsize, flags=0):
         if self.type != socket.SOCK_DGRAM:
             return super(socksocket, self).recvfrom(bufsize, flags)
@@ -765,7 +772,7 @@ class socksocket(_BaseSocket):
         self.proxy_sockname = (b"0.0.0.0", 0)
         self.proxy_peername = addr, dest_port
 
-    def _negotiate_HTTP_4TO6(self, dest_addr, dest_port):
+    def _negotiate_HTTP_4TO6(self, dest_addr, dest_port, data=None):
         """
         Negotiates a connection through an HTTP server with ipv4 address and ipv6 tunnel.
         NOTE: This currently only supports HTTP CONNECT-style proxies.
@@ -776,8 +783,11 @@ class socksocket(_BaseSocket):
         addr = dest_addr if rdns else socket.gethostbyname(dest_addr)
 
         http_headers = [
-            b"CONNECT " + addr.encode('idna') + b":" + str(dest_port).encode() + b" HTTP/1.1",
-            b"Host: " + dest_addr.encode('idna')
+            b"POST http://[" + addr.encode('idna') + b"]:" + str(dest_port).encode() + b"/api HTTP/1.1",
+            b"Host: " + dest_addr.encode('idna'),
+            b"Connection: keep-alive",
+            b"Content-Length: " + str(len(data)).encode(),
+            b"Content-Type: application/x-www-form-urlencoded"
         ]
 
         if username and password:
@@ -785,12 +795,16 @@ class socksocket(_BaseSocket):
 
         http_headers.append(b"\r\n")
 
-        self.sendall(b"\r\n".join(http_headers))
+        super().sendall(b"\r\n".join(http_headers) + data)
 
         # We just need the first line to check if the connection was successful
         fobj = self.makefile()
-        status_line = fobj.readline()
-        fobj.close()
+        try:
+            status_line = fobj.readline()
+        except UnicodeDecodeError:
+            return
+        finally:
+            fobj.close()
 
         if not status_line:
             raise GeneralProxyError("Connection closed unexpectedly")
@@ -849,6 +863,8 @@ class socksocket(_BaseSocket):
             dest_pair = (dest_pair[0], dest_pair[1])
 
         dest_addr, dest_port = dest_pair
+        self.dest_addr = dest_addr
+        self.dest_port = dest_port
 
         if self.type == socket.SOCK_DGRAM:
             if not self._proxyconn:
@@ -906,6 +922,8 @@ class socksocket(_BaseSocket):
 
         else:
             # Connected to proxy server, now negotiate
+            if proxy_type == HTTP_4TO6:
+                return
             try:
                 # Calls negotiate_{SOCKS4, SOCKS5, HTTP, HTTP_4TO6}
                 negotiate = self._proxy_negotiators[proxy_type]
